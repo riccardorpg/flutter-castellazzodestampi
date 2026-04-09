@@ -1,0 +1,144 @@
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+class ApiService {
+  // Produzione
+  static const String baseUrl = 'https://www.castellazzodestampi.org';
+  // Sviluppo locale (decommentare per usare in locale)
+  // static const String baseUrl = 'http://localhost/S7-www.castellazzodestampi.org/public';
+
+  static const String _tokenKey = 'auth_token';
+  static String? token;
+
+  static Map<String, String> get _authHeaders => {
+        'Content-Type': 'application/json',
+        'X-AUTH-TOKEN': ?token,
+      };
+
+  // ── Persistenza token ──────────────────────────────────────────
+
+  static Future<void> saveToken(String t) async {
+    token = t;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_tokenKey, t);
+  }
+
+  /// Restituisce true se esiste un token salvato.
+  static Future<bool> loadToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_tokenKey);
+    if (saved != null && saved.isNotEmpty) {
+      token = saved;
+      return true;
+    }
+    return false;
+  }
+
+  static Future<void> clearToken() async {
+    token = null;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_tokenKey);
+  }
+
+  // ── Auth ───────────────────────────────────────────────────────
+
+  static Future<Map<String, dynamic>> login(
+      String email, String password) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/api/login'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'email': email, 'password': password}),
+          )
+          .timeout(const Duration(seconds: 15));
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      return {'success': false, 'message': 'Errore di connessione.'};
+    }
+  }
+
+  static Future<void> logout() async {
+    try {
+      await http
+          .post(
+            Uri.parse('$baseUrl/api/logout'),
+            headers: _authHeaders,
+          )
+          .timeout(const Duration(seconds: 15));
+    } catch (_) {}
+    await clearToken();
+  }
+
+  // ── Tipi segnalazione ──────────────────────────────────────────
+
+  static Future<Map<String, dynamic>> getReportTypes() async {
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$baseUrl/api/tipi-segnalazione'),
+            headers: _authHeaders,
+          )
+          .timeout(const Duration(seconds: 15));
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      return {'success': false, 'message': 'Errore di connessione.'};
+    }
+  }
+
+  // ── Segnalazioni ───────────────────────────────────────────────
+
+  static Future<Map<String, dynamic>> getMyReports() async {
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$baseUrl/api/segnalazioni'),
+            headers: _authHeaders,
+          )
+          .timeout(const Duration(seconds: 15));
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      return {'success': false, 'message': 'Errore di connessione.'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> createReport({
+    required String typeId,
+    String? details,
+    String? address,
+    String? latitude,
+    String? longitude,
+    List<String> imagePaths = const [],
+  }) async {
+    try {
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$baseUrl/api/segnalazioni'),
+      );
+      request.headers['X-AUTH-TOKEN'] = token ?? '';
+      request.fields['type_id'] = typeId;
+      if (details != null && details.isNotEmpty) {
+        request.fields['details'] = details;
+      }
+      if (address != null && address.isNotEmpty) {
+        request.fields['address'] = address;
+      }
+      if (latitude != null) request.fields['latitude'] = latitude;
+      if (longitude != null) request.fields['longitude'] = longitude;
+
+      for (final path in imagePaths) {
+        request.files.add(await http.MultipartFile.fromPath(
+          'attachments[]',
+          path,
+        ));
+      }
+
+      final streamed = await request.send().timeout(const Duration(seconds: 30));
+      final response = await http.Response.fromStream(streamed);
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      return {'success': false, 'message': 'Errore di connessione.'};
+    }
+  }
+}
