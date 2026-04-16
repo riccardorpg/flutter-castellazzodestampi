@@ -13,7 +13,6 @@ use Symfony\Component\DependencyInjection\ParameterBag\ParameterBagInterface;
 use App\Entity\User;
 use App\Entity\Report;
 use App\Entity\ReportType;
-use App\Entity\ReportAttachment;
 
 #[Route('/api')]
 class ApiController extends AbstractController
@@ -155,7 +154,8 @@ class ApiController extends AbstractController
                 'id' => $type->getId(),
                 'name' => $type->getName(),
                 'slug' => $type->getSlug(),
-                'icon' => $type->getIcon()
+                'icon' => $type->getIcon(),
+                'icon_file' => $type->getIconFile() ? $request->getSchemeAndHttpHost() . '/' . $type->getIconFile() : null
             ];
         }
 
@@ -198,7 +198,7 @@ class ApiController extends AbstractController
             return $this->errorResponse('Segnalazione non trovata.', 404);
         }
 
-        return new JsonResponse(['success' => true, 'data' => $this->serializeReport($report, true)]);
+        return new JsonResponse(['success' => true, 'data' => $this->serializeReport($report)]);
     }
 
     #[Route('/segnalazioni', name: 'api_report_create', methods: ['POST'])]
@@ -241,7 +241,7 @@ class ApiController extends AbstractController
         $em->flush();
 
         // Handle file uploads
-        $this->handleAttachments($request, $report, $em);
+        $this->handleAttachments($request, $report);
 
         return new JsonResponse([
             'success' => true,
@@ -296,7 +296,7 @@ class ApiController extends AbstractController
         }
 
         // Handle new file uploads
-        $this->handleAttachments($request, $report, $em);
+        $this->handleAttachments($request, $report);
 
         $em->flush();
 
@@ -326,14 +326,14 @@ class ApiController extends AbstractController
             return $this->errorResponse('Solo le segnalazioni in attesa possono essere eliminate.');
         }
 
-        // Remove attachment files
         $uploadDir = $this->params->get('kernel.project_dir').'/'.$this->params->get('web_path').'/uploads/reports/'.$report->getId().'/';
-        foreach ($report->getAttachments() as $attachment) {
-            $filePath = $uploadDir.$attachment->getFilePath();
-            if (file_exists($filePath)) {
-                unlink($filePath);
+        if (is_dir($uploadDir)) {
+            foreach (scandir($uploadDir) as $filename) {
+                if ($filename !== '.' && $filename !== '..') {
+                    @unlink($uploadDir.$filename);
+                }
             }
-            $em->remove($attachment);
+            @rmdir($uploadDir);
         }
 
         $em->remove($report);
@@ -342,9 +342,94 @@ class ApiController extends AbstractController
         return new JsonResponse(['success' => true, 'message' => 'Segnalazione eliminata.']);
     }
 
+    // ==================== GEOCODING ====================
+
+    #[Route('/autocomplete-indirizzo', name: 'api_autocomplete_address', methods: ['GET'])]
+    public function autocompleteAddress(Request $request): JsonResponse
+    {
+        $user = $this->getAuthenticatedUser($request);
+        if (!$user) {
+            return $this->errorResponse('Non autenticato.', 401);
+        }
+
+        $q = trim($request->query->get('q', ''));
+        if (strlen($q) < 3) {
+            return new JsonResponse(['success' => true, 'data' => []]);
+        }
+
+        $url = 'https://nominatim.openstreetmap.org/search?'
+            .http_build_query([
+                'q' => $q,
+                'format' => 'json',
+                'addressdetails' => 1,
+                'limit' => 5,
+                'countrycodes' => 'it',
+            ]);
+
+        $ctx = stream_context_create(['http' => ['header' => "User-Agent: castellazzodestampi-app/1.0\r\n", 'timeout' => 8]]);
+        $raw = @file_get_contents($url, false, $ctx);
+        if (!$raw) {
+            return new JsonResponse(['success' => true, 'data' => []]);
+        }
+
+        $results = json_decode($raw, true) ?? [];
+        $data = [];
+        foreach ($results as $r) {
+            $data[] = [
+                'display_name' => $r['display_name'] ?? '',
+                'lat' => $r['lat'] ?? '',
+                'lon' => $r['lon'] ?? '',
+            ];
+        }
+
+        return new JsonResponse(['success' => true, 'data' => $data]);
+    }
+
+    #[Route('/reverse-geocode', name: 'api_reverse_geocode', methods: ['GET'])]
+    public function reverseGeocode(Request $request): JsonResponse
+    {
+        $user = $this->getAuthenticatedUser($request);
+        if (!$user) {
+            return $this->errorResponse('Non autenticato.', 401);
+        }
+
+        $lat = $request->query->get('lat', '');
+        $lon = $request->query->get('lon', '');
+
+        if (!$lat || !$lon) {
+            return $this->errorResponse('Parametri lat e lon obbligatori.');
+        }
+
+        $url = 'https://nominatim.openstreetmap.org/reverse?'
+            .http_build_query([
+                'lat' => $lat,
+                'lon' => $lon,
+                'format' => 'json',
+                'addressdetails' => 1,
+            ]);
+
+        $ctx = stream_context_create(['http' => ['header' => "User-Agent: castellazzodestampi-app/1.0\r\n", 'timeout' => 8]]);
+        $raw = @file_get_contents($url, false, $ctx);
+        if (!$raw) {
+            return new JsonResponse(['success' => true, 'data' => null]);
+        }
+
+        $result = json_decode($raw, true) ?? [];
+        $addr = $result['address'] ?? [];
+        $parts = array_filter([
+            $addr['road'] ?? null,
+            isset($addr['house_number']) ? $addr['house_number'] : null,
+            $addr['village'] ?? $addr['town'] ?? $addr['city'] ?? null,
+        ]);
+
+        $address = implode(', ', $parts) ?: ($result['display_name'] ?? null);
+
+        return new JsonResponse(['success' => true, 'data' => ['address' => $address]]);
+    }
+
     // ==================== HELPERS ====================
 
-    private function handleAttachments(Request $request, Report $report, $em): void
+    private function handleAttachments(Request $request, Report $report): void
     {
         $files = $request->files->get('attachments');
         if (!$files) {
@@ -365,34 +450,42 @@ class ApiController extends AbstractController
                 continue;
             }
 
-            $originalName = $file->getClientOriginalName();
             $extension = $file->guessExtension() ?? $file->getClientOriginalExtension();
             $fileName = uniqid().'.'.$extension;
 
             $file->move($uploadDir, $fileName);
-
-            $attachment = new ReportAttachment();
-            $attachment->setReport($report);
-            $attachment->setFileName($originalName);
-            $attachment->setFilePath($fileName);
-            $attachment->setFileType($file->getClientMimeType() ?? $extension);
-            $attachment->setFileSize(filesize($uploadDir.$fileName));
-            $attachment->setUploadedAt(new \DateTime());
-
-            $em->persist($attachment);
         }
-
-        $em->flush();
     }
 
-    private function serializeReport(Report $report, bool $includeAttachments = false): array
+    private function serializeReport(Report $report): array
     {
-        $data = [
+        $attachments = [];
+        $uploadDir = $this->params->get('kernel.project_dir').'/'.$this->params->get('web_path').'/uploads/reports/'.$report->getId().'/';
+        if (is_dir($uploadDir)) {
+            $imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+            foreach (scandir($uploadDir) as $filename) {
+                if ($filename === '.' || $filename === '..') {
+                    continue;
+                }
+                $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+                $attachments[] = [
+                    'file_name' => $filename,
+                    'file_path' => '/uploads/reports/'.$report->getId().'/'.$filename,
+                    'file_type' => in_array($ext, $imageExtensions) ? 'image/'.$ext : 'file/'.$ext,
+                    'uploaded_at' => date('Y-m-d H:i:s', filemtime($uploadDir.$filename))
+                ];
+            }
+        }
+
+        return [
             'id' => $report->getId(),
             'type' => [
                 'id' => $report->getReportType()->getId(),
                 'name' => $report->getReportType()->getName(),
-                'slug' => $report->getReportType()->getSlug()
+                'slug' => $report->getReportType()->getSlug(),
+                'icon_file' => $report->getReportType()->getIconFile()
+                    ? '/'.$report->getReportType()->getIconFile()
+                    : null
             ],
             'datetime' => $report->getDatetime()->format('Y-m-d H:i:s'),
             'latitude' => $report->getLatitude(),
@@ -401,23 +494,8 @@ class ApiController extends AbstractController
             'priority' => $report->getPriority(),
             'details' => $report->getDetails(),
             'status' => $report->getStatus(),
-            'status_label' => $report->getStatusLabel()
+            'status_label' => $report->getStatusLabel(),
+            'attachments' => $attachments
         ];
-
-        if ($includeAttachments) {
-            $attachments = [];
-            foreach ($report->getAttachments() as $att) {
-                $attachments[] = [
-                    'id' => $att->getId(),
-                    'file_name' => $att->getFileName(),
-                    'file_path' => '/uploads/reports/'.$report->getId().'/'.$att->getFilePath(),
-                    'file_type' => $att->getFileType(),
-                    'uploaded_at' => $att->getUploadedAt()->format('Y-m-d H:i:s')
-                ];
-            }
-            $data['attachments'] = $attachments;
-        }
-
-        return $data;
     }
 }

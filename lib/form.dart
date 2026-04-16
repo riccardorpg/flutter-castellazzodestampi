@@ -1,13 +1,15 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
 import 'segnalazioni.dart';
 import 'services/api_service.dart';
 
 class FormScreen extends StatefulWidget {
   final Map<String, dynamic> reportType;
-
   const FormScreen({super.key, required this.reportType});
 
   @override
@@ -17,6 +19,7 @@ class FormScreen extends StatefulWidget {
 class _FormScreenState extends State<FormScreen> {
   final _detailsController = TextEditingController();
   final _addressController = TextEditingController();
+  final _addressFocus = FocusNode();
   final _picker = ImagePicker();
 
   List<XFile> _images = [];
@@ -26,14 +29,70 @@ class _FormScreenState extends State<FormScreen> {
   bool _loading = false;
   String? _error;
 
+  List<Map<String, dynamic>> _suggestions = [];
+  Timer? _debounce;
+
+  static const _nominatimHeaders = {
+    'User-Agent': 'CastellazzoDestampiApp/1.0',
+    'Accept-Language': 'it',
+  };
+
   @override
   void dispose() {
     _detailsController.dispose();
     _addressController.dispose();
+    _addressFocus.dispose();
+    _debounce?.cancel();
     super.dispose();
   }
 
-  // ── GPS ────────────────────────────────────────────────────────
+  // ── Nominatim autocomplete ─────────────────────────────────────
+
+  void _onAddressChanged(String value) {
+    _debounce?.cancel();
+    if (value.trim().length < 3) {
+      if (_suggestions.isNotEmpty) setState(() => _suggestions = []);
+      return;
+    }
+    _debounce = Timer(const Duration(milliseconds: 600), () => _searchAddress(value));
+  }
+
+  Future<void> _searchAddress(String query) async {
+    try {
+      final uri = Uri.https('nominatim.openstreetmap.org', '/search', {
+        'q': query,
+        'format': 'json',
+        'limit': '5',
+        'addressdetails': '1',
+        'accept-language': 'it',
+      });
+      final res = await http
+          .get(uri, headers: _nominatimHeaders)
+          .timeout(const Duration(seconds: 8));
+      if (!mounted) return;
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as List;
+        setState(() => _suggestions = List<Map<String, dynamic>>.from(data));
+      }
+    } catch (_) {
+      // ricerca silenziosa
+    }
+  }
+
+  void _selectSuggestion(Map<String, dynamic> item) {
+    final display = item['display_name'] as String? ?? '';
+    final lat = double.tryParse(item['lat']?.toString() ?? '');
+    final lon = double.tryParse(item['lon']?.toString() ?? '');
+    _addressController.text = display;
+    _addressFocus.unfocus();
+    setState(() {
+      _latitude = lat;
+      _longitude = lon;
+      _suggestions = [];
+    });
+  }
+
+  // ── GPS + reverse geocoding ────────────────────────────────────
 
   Future<void> _getLocation() async {
     setState(() {
@@ -55,22 +114,69 @@ class _FormScreenState extends State<FormScreen> {
         return;
       }
 
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
+      // Prima prova la posizione in cache (istantanea)
+      Position? pos = await Geolocator.getLastKnownPosition();
+
+      // Se non disponibile, acquisisce con precisione media (più veloce)
+      pos ??= await Geolocator.getCurrentPosition(
+        locationSettings: AndroidSettings(
+          accuracy: LocationAccuracy.medium,
+          timeLimit: const Duration(seconds: 15),
         ),
       );
 
+      if (!mounted) return;
       setState(() {
-        _latitude = pos.latitude;
+        _latitude = pos!.latitude;
         _longitude = pos.longitude;
         _locating = false;
       });
-    } catch (e) {
+
+      // Converte coordinate in indirizzo
+      await _reverseGeocode(pos.latitude, pos.longitude);
+    } on TimeoutException {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Timeout GPS. Riprova o inserisci l\'indirizzo manualmente.';
+        _locating = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
       setState(() {
         _error = 'Impossibile ottenere la posizione.';
         _locating = false;
       });
+    }
+  }
+
+  Future<void> _reverseGeocode(double lat, double lon) async {
+    try {
+      final uri = Uri.https('nominatim.openstreetmap.org', '/reverse', {
+        'lat': '$lat',
+        'lon': '$lon',
+        'format': 'json',
+        'addressdetails': '1',
+        'accept-language': 'it',
+      });
+      final res = await http
+          .get(uri, headers: _nominatimHeaders)
+          .timeout(const Duration(seconds: 8));
+      if (!mounted) return;
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final addr = data['address'] as Map<String, dynamic>? ?? {};
+        final road   = addr['road'] ?? addr['pedestrian'] ?? addr['footway'] ?? '';
+        final number = addr['house_number'] ?? '';
+        final city   = addr['city'] ?? addr['town'] ?? addr['village'] ?? addr['municipality'] ?? '';
+        final parts  = <String>[
+          if (road.isNotEmpty) (number.isNotEmpty ? '$road, $number' : road),
+          if (city.isNotEmpty) city,
+        ];
+        final display = parts.isNotEmpty ? parts.join(', ') : (data['display_name'] as String? ?? '');
+        if (display.isNotEmpty) setState(() => _addressController.text = display);
+      }
+    } catch (_) {
+      // indirizzo non trovato — rimane quello scritto dall'utente
     }
   }
 
@@ -80,31 +186,29 @@ class _FormScreenState extends State<FormScreen> {
     setState(() => _error = null);
     try {
       final picked = await _picker.pickMultiImage();
-      if (picked.isNotEmpty) {
-        setState(() => _images = [..._images, ...picked]);
-      }
+      if (picked.isNotEmpty) setState(() => _images = [..._images, ...picked]);
     } catch (_) {
-      // pickMultiImage non disponibile, fallback a singola immagine
       try {
         final single = await _picker.pickImage(source: ImageSource.gallery);
-        if (single != null) {
-          setState(() => _images = [..._images, single]);
-        }
+        if (single != null) setState(() => _images = [..._images, single]);
       } catch (_) {
-        setState(() => _error = 'Impossibile accedere alla galleria. Verifica i permessi nelle impostazioni.');
+        setState(() => _error =
+            'Impossibile accedere alla galleria. Verifica i permessi nelle impostazioni.');
       }
     }
   }
 
-  void _removeImage(int index) {
-    setState(() => _images.removeAt(index));
-  }
+  void _removeImage(int index) => setState(() => _images.removeAt(index));
 
   // ── Submit ─────────────────────────────────────────────────────
 
   Future<void> _submit() async {
     if (_detailsController.text.trim().isEmpty) {
       setState(() => _error = 'Inserisci una descrizione.');
+      return;
+    }
+    if (_addressController.text.trim().isEmpty) {
+      setState(() => _error = 'Inserisci un indirizzo.');
       return;
     }
 
@@ -116,9 +220,7 @@ class _FormScreenState extends State<FormScreen> {
     final result = await ApiService.createReport(
       typeId: widget.reportType['id'].toString(),
       details: _detailsController.text.trim(),
-      address: _addressController.text.trim().isEmpty
-          ? null
-          : _addressController.text.trim(),
+      address: _addressController.text.trim(),
       latitude: _latitude?.toString(),
       longitude: _longitude?.toString(),
       imagePaths: _images.map((x) => x.path).toList(),
@@ -149,6 +251,7 @@ class _FormScreenState extends State<FormScreen> {
       appBar: AppBar(
         backgroundColor: Colors.white,
         elevation: 0,
+        centerTitle: true,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new,
               color: Color(0xFF111111), size: 18),
@@ -167,114 +270,144 @@ class _FormScreenState extends State<FormScreen> {
       body: Column(
         children: [
           Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Badge tipo
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFEDF5E9),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.label_outline,
-                            color: Color(0xFF7BA566), size: 16),
-                        const SizedBox(width: 6),
-                        Text(
-                          typeName,
-                          style: const TextStyle(
-                            color: Color(0xFF7BA566),
-                            fontSize: 13,
-                            fontFamily: 'Inter',
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-
-                  // ── Descrizione ──────────────────────────────
-                  _sectionLabel('DESCRIZIONE DETTAGLIATA'),
-                  const SizedBox(height: 8),
-                  _fieldBox(
-                    child: TextField(
-                      controller: _detailsController,
-                      maxLines: 5,
-                      style: _inputStyle,
-                      decoration: const InputDecoration(
-                        hintText: 'Descrivi il problema nel dettaglio…',
-                        hintStyle: TextStyle(color: Color(0xFF9CA3AF)),
-                        border: InputBorder.none,
-                        contentPadding: EdgeInsets.all(14),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-
-                  // ── Indirizzo ────────────────────────────────
-                  _sectionLabel('INDIRIZZO (opzionale)'),
-                  const SizedBox(height: 8),
-                  _fieldBox(
-                    child: TextField(
-                      controller: _addressController,
-                      style: _inputStyle,
-                      decoration: const InputDecoration(
-                        hintText: 'Es. Via Roma 12, Castellazzo…',
-                        hintStyle: TextStyle(color: Color(0xFF9CA3AF)),
-                        prefixIcon: Icon(Icons.location_on_outlined,
-                            color: Color(0xFF9CA3AF), size: 20),
-                        border: InputBorder.none,
-                        contentPadding: EdgeInsets.symmetric(vertical: 16),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-
-                  // ── GPS ──────────────────────────────────────
-                  _sectionLabel('POSIZIONE GPS (opzionale)'),
-                  const SizedBox(height: 8),
-                  if (_latitude != null)
+            child: GestureDetector(
+              onTap: () {
+                _addressFocus.unfocus();
+                if (_suggestions.isNotEmpty) setState(() => _suggestions = []);
+              },
+              behavior: HitTestBehavior.opaque,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(24, 24, 24, 40),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Badge tipo
                     Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
+                          horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFF0FDF4),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: const Color(0xFF86EFAC)),
+                        color: const Color(0xFFEDF5E9),
+                        borderRadius: BorderRadius.circular(8),
                       ),
                       child: Row(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.check_circle,
-                              color: Color(0xFF16A34A), size: 16),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              '${_latitude!.toStringAsFixed(6)}, '
-                              '${_longitude!.toStringAsFixed(6)}',
-                              style: const TextStyle(
-                                color: Color(0xFF16A34A),
-                                fontSize: 12,
-                                fontFamily: 'Inter',
-                              ),
+                          const Icon(Icons.label_outline,
+                              color: Color(0xFF7BA566), size: 16),
+                          const SizedBox(width: 6),
+                          Text(
+                            typeName,
+                            style: const TextStyle(
+                              color: Color(0xFF7BA566),
+                              fontSize: 13,
+                              fontFamily: 'Inter',
+                              fontWeight: FontWeight.w600,
                             ),
-                          ),
-                          GestureDetector(
-                            onTap: () => setState(
-                                () => _latitude = _longitude = null),
-                            child: const Icon(Icons.close,
-                                color: Color(0xFF16A34A), size: 16),
                           ),
                         ],
                       ),
-                    )
-                  else
+                    ),
+                    const SizedBox(height: 24),
+
+                    // ── Descrizione ──────────────────────────────
+                    _sectionLabel('DESCRIZIONE DETTAGLIATA'),
+                    const SizedBox(height: 8),
+                    _fieldBox(
+                      child: TextField(
+                        controller: _detailsController,
+                        maxLines: 5,
+                        style: _inputStyle,
+                        decoration: const InputDecoration(
+                          hintText: 'Descrivi il problema nel dettaglio…',
+                          hintStyle: TextStyle(color: Color(0xFF9CA3AF)),
+                          border: InputBorder.none,
+                          contentPadding: EdgeInsets.all(14),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+
+                    // ── Indirizzo ────────────────────────────────
+                    _sectionLabel('INDIRIZZO *'),
+                    const SizedBox(height: 8),
+                    _fieldBox(
+                      child: TextField(
+                        controller: _addressController,
+                        focusNode: _addressFocus,
+                        style: _inputStyle,
+                        onChanged: _onAddressChanged,
+                        decoration: const InputDecoration(
+                          hintText: 'Es. Via Roma 12, Castellazzo…',
+                          hintStyle: TextStyle(color: Color(0xFF9CA3AF)),
+                          prefixIcon: Icon(Icons.location_on_outlined,
+                              color: Color(0xFF9CA3AF), size: 20),
+                          border: InputBorder.none,
+                          contentPadding: EdgeInsets.symmetric(vertical: 16),
+                        ),
+                      ),
+                    ),
+
+                    // Suggerimenti Nominatim
+                    if (_suggestions.isNotEmpty)
+                      Container(
+                        margin: const EdgeInsets.only(top: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFFE5E7EB)),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.08),
+                              blurRadius: 8,
+                              offset: const Offset(0, 3),
+                            ),
+                          ],
+                        ),
+                        child: Column(
+                          children: _suggestions.asMap().entries.map((e) {
+                            final name =
+                                e.value['display_name'] as String? ?? '';
+                            return Column(
+                              children: [
+                                if (e.key > 0)
+                                  const Divider(
+                                      height: 1, color: Color(0xFFF3F4F6)),
+                                InkWell(
+                                  onTap: () => _selectSuggestion(e.value),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 14, vertical: 12),
+                                    child: Row(
+                                      children: [
+                                        const Icon(Icons.location_on_outlined,
+                                            size: 14,
+                                            color: Color(0xFF7BA566)),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            name,
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              color: Color(0xFF333333),
+                                              fontSize: 13,
+                                              fontFamily: 'Inter',
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            );
+                          }).toList(),
+                        ),
+                      ),
+
+                    const SizedBox(height: 10),
+
+                    // Pulsante GPS (conta come indirizzo)
                     SizedBox(
                       width: double.infinity,
                       child: OutlinedButton.icon(
@@ -297,146 +430,150 @@ class _FormScreenState extends State<FormScreen> {
                             : const Icon(Icons.my_location, size: 16),
                         label: Text(
                           _locating
-                              ? 'Acquisizione…'
-                              : 'Usa posizione attuale',
+                              ? 'Acquisizione GPS…'
+                              : 'Usa la mia posizione',
                           style: const TextStyle(
                               fontFamily: 'Inter', fontSize: 13),
                         ),
                       ),
                     ),
-                  const SizedBox(height: 20),
 
-                  // ── Foto ─────────────────────────────────────
-                  _sectionLabel('FOTO (opzionale)'),
-                  const SizedBox(height: 8),
-                  if (_images.isNotEmpty) ...[
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: List.generate(_images.length, (i) {
-                        return Stack(
-                          children: [
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(8),
-                              child: Image.file(
-                                File(_images[i].path),
-                                width: 80,
-                                height: 80,
-                                fit: BoxFit.cover,
+                    const SizedBox(height: 20),
+
+                    // ── Foto (opzionale) ──────────────────────────
+                    _sectionLabel('FOTO (opzionale)'),
+                    const SizedBox(height: 8),
+                    if (_images.isNotEmpty) ...[
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: List.generate(_images.length, (i) {
+                          return Stack(
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.file(
+                                  File(_images[i].path),
+                                  width: 80,
+                                  height: 80,
+                                  fit: BoxFit.cover,
+                                ),
                               ),
-                            ),
-                            Positioned(
-                              top: 2,
-                              right: 2,
-                              child: GestureDetector(
-                                onTap: () => _removeImage(i),
-                                child: Container(
-                                  decoration: const BoxDecoration(
-                                    color: Colors.black54,
-                                    shape: BoxShape.circle,
+                              Positioned(
+                                top: 2,
+                                right: 2,
+                                child: GestureDetector(
+                                  onTap: () => _removeImage(i),
+                                  child: Container(
+                                    decoration: const BoxDecoration(
+                                      color: Colors.black54,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Icon(Icons.close,
+                                        color: Colors.white, size: 14),
                                   ),
-                                  child: const Icon(Icons.close,
-                                      color: Colors.white, size: 14),
+                                ),
+                              ),
+                            ],
+                          );
+                        }),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: _pickImages,
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFF7BA566),
+                          side: const BorderSide(color: Color(0xFF7BA566)),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10)),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        icon: const Icon(Icons.add_photo_alternate_outlined,
+                            size: 16),
+                        label: Text(
+                          _images.isEmpty
+                              ? 'Aggiungi foto dalla galleria'
+                              : 'Aggiungi altre foto',
+                          style: const TextStyle(
+                              fontFamily: 'Inter', fontSize: 13),
+                        ),
+                      ),
+                    ),
+
+                    if (_error != null) ...[
+                      const SizedBox(height: 16),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFEF2F2),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFFFCA5A5)),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.error_outline,
+                                color: Colors.redAccent, size: 16),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                _error!,
+                                style: const TextStyle(
+                                  color: Colors.redAccent,
+                                  fontSize: 13,
+                                  fontFamily: 'Inter',
                                 ),
                               ),
                             ),
                           ],
-                        );
-                      }),
-                    ),
-                    const SizedBox(height: 8),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 60),
                   ],
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: _pickImages,
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: const Color(0xFF7BA566),
-                        side: const BorderSide(color: Color(0xFF7BA566)),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10)),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                      icon: const Icon(Icons.add_photo_alternate_outlined,
-                          size: 16),
-                      label: Text(
-                        _images.isEmpty
-                            ? 'Aggiungi foto dalla galleria'
-                            : 'Aggiungi altre foto',
-                        style: const TextStyle(
-                            fontFamily: 'Inter', fontSize: 13),
-                      ),
-                    ),
-                  ),
-
-                  if (_error != null) ...[
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFEF2F2),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: const Color(0xFFFCA5A5)),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.error_outline,
-                              color: Colors.redAccent, size: 16),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              _error!,
-                              style: const TextStyle(
-                                color: Colors.redAccent,
-                                fontSize: 13,
-                                fontFamily: 'Inter',
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 16),
-                ],
+                ),
               ),
             ),
           ),
 
           // ── Bottone INVIA fisso ───────────────────────────────
-          Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-            child: SizedBox(
-              width: double.infinity,
-              height: 52,
-              child: ElevatedButton(
-                onPressed: _loading ? null : _submit,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF7BA566),
-                  foregroundColor: Colors.white,
-                  disabledBackgroundColor:
-                      const Color(0xFF7BA566).withValues(alpha: 0.5),
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+          SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 12, 24, 16),
+              child: SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: ElevatedButton(
+                  onPressed: _loading ? null : _submit,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF7BA566),
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor:
+                        const Color(0xFF7BA566).withValues(alpha: 0.5),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
-                ),
-                child: _loading
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                            color: Colors.white, strokeWidth: 2),
-                      )
-                    : const Text(
-                        'INVIA',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          fontFamily: 'Inter',
+                  child: _loading
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                              color: Colors.white, strokeWidth: 2),
+                        )
+                      : const Text(
+                          'INVIA',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            fontFamily: 'Inter',
+                          ),
                         ),
-                      ),
+                ),
               ),
             ),
           ),

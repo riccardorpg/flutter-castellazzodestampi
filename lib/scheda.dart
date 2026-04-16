@@ -1,161 +1,45 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:geolocator/geolocator.dart';
-import 'segnalazioni.dart';
 import 'services/api_service.dart';
 
-class FormScreen extends StatefulWidget {
-  final Map<String, dynamic> reportType;
+class SchedaScreen extends StatelessWidget {
+  final Map<String, dynamic> report;
+  const SchedaScreen({super.key, required this.report});
 
-  const FormScreen({super.key, required this.reportType});
-
-  @override
-  State<FormScreen> createState() => _FormScreenState();
-}
-
-class _FormScreenState extends State<FormScreen> {
-  final _detailsController = TextEditingController();
-  final _addressController = TextEditingController();
-  final _picker = ImagePicker();
-
-  List<XFile> _images = [];
-  double? _latitude;
-  double? _longitude;
-  bool _locating = false;
-  bool _loading = false;
-  String? _error;
-
-  @override
-  void dispose() {
-    _detailsController.dispose();
-    _addressController.dispose();
-    super.dispose();
-  }
-
-  // ── GPS ────────────────────────────────────────────────────────
-
-  Future<void> _getLocation() async {
-    setState(() {
-      _locating = true;
-      _error = null;
-    });
-
-    try {
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.deniedForever ||
-          permission == LocationPermission.denied) {
-        setState(() {
-          _error = 'Permesso posizione negato.';
-          _locating = false;
-        });
-        return;
-      }
-
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-        ),
-      );
-
-      setState(() {
-        _latitude = pos.latitude;
-        _longitude = pos.longitude;
-        _locating = false;
-      });
-    } catch (e) {
-      setState(() {
-        _error = 'Impossibile ottenere la posizione.';
-        _locating = false;
-      });
-    }
-  }
-
-  // ── Galleria ───────────────────────────────────────────────────
-
-  Future<void> _pickImages() async {
-    try {
-      final picked = await _picker.pickMultiImage();
-      if (picked.isNotEmpty) {
-        setState(() => _images = [..._images, ...picked]);
-      }
-    } catch (_) {
-      // pickMultiImage non disponibile, fallback a singola immagine
-      try {
-        final single =
-            await _picker.pickImage(source: ImageSource.gallery);
-        if (single != null) {
-          setState(() => _images = [..._images, single]);
-        }
-      } catch (e) {
-        setState(() => _error = 'Impossibile accedere alla galleria.');
-      }
-    }
-  }
-
-  void _removeImage(int index) {
-    setState(() => _images.removeAt(index));
-  }
-
-  // ── Submit ─────────────────────────────────────────────────────
-
-  Future<void> _submit() async {
-    if (_detailsController.text.trim().isEmpty) {
-      setState(() => _error = 'Inserisci una descrizione.');
-      return;
-    }
-
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-
-    final result = await ApiService.createReport(
-      typeId: widget.reportType['id'].toString(),
-      details: _detailsController.text.trim(),
-      address: _addressController.text.trim().isEmpty
-          ? null
-          : _addressController.text.trim(),
-      latitude: _latitude?.toString(),
-      longitude: _longitude?.toString(),
-      imagePaths: _images.map((x) => x.path).toList(),
+  List<Map<String, dynamic>> get _images {
+    final attachments = report['attachments'] as List? ?? [];
+    return List<Map<String, dynamic>>.from(
+      attachments.where((a) {
+        final ft = (a['file_type'] as String? ?? '').toLowerCase();
+        return ft.startsWith('image/');
+      }),
     );
-
-    if (!mounted) return;
-    setState(() => _loading = false);
-
-    if (result['success'] == true) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const SegnalazioniScreen()),
-      );
-    } else {
-      setState(() =>
-          _error = result['message'] as String? ?? 'Errore durante l\'invio.');
-    }
   }
-
-  // ── UI ─────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
-    final typeName = widget.reportType['name'] as String? ?? '';
+    final type = report['type'] as Map<String, dynamic>?;
+    final typeName = type?['name'] as String? ?? '—';
+    final details = report['details'] as String? ?? '';
+    final address = report['address'] as String? ?? '';
+    final status = report['status'] as String? ?? '';
+    final statusLabel = report['status_label'] as String? ?? status;
+    final datetime = report['datetime'] as String? ?? '';
+    final color = _statusColor(status);
+    final images = _images;
 
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
         backgroundColor: Colors.white,
         elevation: 0,
+        centerTitle: true,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new,
               color: Color(0xFF111111), size: 18),
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text(
-          'Nuova Segnalazione',
+          'Dettaglio segnalazione',
           style: TextStyle(
             color: Color(0xFF111111),
             fontSize: 18,
@@ -164,310 +48,320 @@ class _FormScreenState extends State<FormScreen> {
           ),
         ),
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ── Banner stato ──────────────────────────────────────
+            Container(
+              width: double.infinity,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.10),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: color.withValues(alpha: 0.30)),
+              ),
+              child: Row(
                 children: [
-                  // Badge tipo
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFEDF5E9),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.label_outline,
-                            color: Color(0xFF7BA566), size: 16),
-                        const SizedBox(width: 6),
-                        Text(
-                          typeName,
-                          style: const TextStyle(
-                            color: Color(0xFF7BA566),
-                            fontSize: 13,
-                            fontFamily: 'Inter',
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
+                  Icon(_statusIcon(status), color: color, size: 20),
+                  const SizedBox(width: 10),
+                  Text(
+                    statusLabel.toUpperCase(),
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 14,
+                      fontFamily: 'Inter',
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.5,
                     ),
                   ),
-                  const SizedBox(height: 24),
-
-                  // ── Descrizione ──────────────────────────────
-                  _sectionLabel('DESCRIZIONE DETTAGLIATA'),
-                  const SizedBox(height: 8),
-                  _fieldBox(
-                    child: TextField(
-                      controller: _detailsController,
-                      maxLines: 5,
-                      style: _inputStyle,
-                      decoration: const InputDecoration(
-                        hintText: 'Descrivi il problema nel dettaglio…',
-                        hintStyle: TextStyle(color: Color(0xFF9CA3AF)),
-                        border: InputBorder.none,
-                        contentPadding: EdgeInsets.all(14),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-
-                  // ── Indirizzo ────────────────────────────────
-                  _sectionLabel('INDIRIZZO (opzionale)'),
-                  const SizedBox(height: 8),
-                  _fieldBox(
-                    child: TextField(
-                      controller: _addressController,
-                      style: _inputStyle,
-                      decoration: const InputDecoration(
-                        hintText: 'Es. Via Roma 12, Castellazzo…',
-                        hintStyle: TextStyle(color: Color(0xFF9CA3AF)),
-                        prefixIcon: Icon(Icons.location_on_outlined,
-                            color: Color(0xFF9CA3AF), size: 20),
-                        border: InputBorder.none,
-                        contentPadding: EdgeInsets.symmetric(vertical: 16),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-
-                  // ── GPS ──────────────────────────────────────
-                  _sectionLabel('POSIZIONE GPS (opzionale)'),
-                  const SizedBox(height: 8),
-                  if (_latitude != null)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF0FDF4),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: const Color(0xFF86EFAC)),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.check_circle,
-                              color: Color(0xFF16A34A), size: 16),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              '${_latitude!.toStringAsFixed(6)}, '
-                              '${_longitude!.toStringAsFixed(6)}',
-                              style: const TextStyle(
-                                color: Color(0xFF16A34A),
-                                fontSize: 12,
-                                fontFamily: 'Inter',
-                              ),
-                            ),
-                          ),
-                          GestureDetector(
-                            onTap: () => setState(
-                                () => _latitude = _longitude = null),
-                            child: const Icon(Icons.close,
-                                color: Color(0xFF16A34A), size: 16),
-                          ),
-                        ],
-                      ),
-                    )
-                  else
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: _locating ? null : _getLocation,
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: const Color(0xFF7BA566),
-                          side: const BorderSide(color: Color(0xFF7BA566)),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10)),
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                        icon: _locating
-                            ? const SizedBox(
-                                width: 14,
-                                height: 14,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Color(0xFF7BA566)),
-                              )
-                            : const Icon(Icons.my_location, size: 16),
-                        label: Text(
-                          _locating
-                              ? 'Acquisizione…'
-                              : 'Usa posizione attuale',
-                          style: const TextStyle(
-                              fontFamily: 'Inter', fontSize: 13),
-                        ),
-                      ),
-                    ),
-                  const SizedBox(height: 20),
-
-                  // ── Foto ─────────────────────────────────────
-                  _sectionLabel('FOTO (opzionale)'),
-                  const SizedBox(height: 8),
-                  if (_images.isNotEmpty) ...[
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: List.generate(_images.length, (i) {
-                        return Stack(
-                          children: [
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(8),
-                              child: Image.file(
-                                File(_images[i].path),
-                                width: 80,
-                                height: 80,
-                                fit: BoxFit.cover,
-                              ),
-                            ),
-                            Positioned(
-                              top: 2,
-                              right: 2,
-                              child: GestureDetector(
-                                onTap: () => _removeImage(i),
-                                child: Container(
-                                  decoration: const BoxDecoration(
-                                    color: Colors.black54,
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: const Icon(Icons.close,
-                                      color: Colors.white, size: 14),
-                                ),
-                              ),
-                            ),
-                          ],
-                        );
-                      }),
-                    ),
-                    const SizedBox(height: 8),
-                  ],
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: _pickImages,
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: const Color(0xFF7BA566),
-                        side: const BorderSide(color: Color(0xFF7BA566)),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10)),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                      icon: const Icon(Icons.add_photo_alternate_outlined,
-                          size: 16),
-                      label: Text(
-                        _images.isEmpty
-                            ? 'Aggiungi foto dalla galleria'
-                            : 'Aggiungi altre foto',
-                        style: const TextStyle(
-                            fontFamily: 'Inter', fontSize: 13),
-                      ),
-                    ),
-                  ),
-
-                  if (_error != null) ...[
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFEF2F2),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: const Color(0xFFFCA5A5)),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.error_outline,
-                              color: Colors.redAccent, size: 16),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              _error!,
-                              style: const TextStyle(
-                                color: Colors.redAccent,
-                                fontSize: 13,
-                                fontFamily: 'Inter',
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 16),
                 ],
               ),
             ),
-          ),
+            const SizedBox(height: 20),
 
-          // ── Bottone INVIA fisso ───────────────────────────────
-          Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-            child: SizedBox(
-              width: double.infinity,
-              height: 52,
-              child: ElevatedButton(
-                onPressed: _loading ? null : _submit,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF7BA566),
-                  foregroundColor: Colors.white,
-                  disabledBackgroundColor:
-                      const Color(0xFF7BA566).withValues(alpha: 0.5),
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                child: _loading
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                            color: Colors.white, strokeWidth: 2),
-                      )
-                    : const Text(
-                        'INVIA',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          fontFamily: 'Inter',
-                        ),
-                      ),
+            // ── Tipo ─────────────────────────────────────────────
+            Text(
+              typeName,
+              style: const TextStyle(
+                color: Color(0xFF111111),
+                fontSize: 22,
+                fontFamily: 'Inter',
+                fontWeight: FontWeight.bold,
               ),
             ),
-          ),
-        ],
+            const SizedBox(height: 16),
+            const Divider(color: Color(0xFFE5E7EB)),
+            const SizedBox(height: 16),
+
+            // ── Descrizione ───────────────────────────────────────
+            if (details.isNotEmpty) ...[
+              _label('DESCRIZIONE'),
+              const SizedBox(height: 8),
+              Text(
+                details,
+                style: const TextStyle(
+                  color: Color(0xFF333333),
+                  fontSize: 14,
+                  fontFamily: 'Inter',
+                  height: 1.55,
+                ),
+              ),
+              const SizedBox(height: 20),
+            ],
+
+            // ── Indirizzo ─────────────────────────────────────────
+            if (address.isNotEmpty) ...[
+              _label('INDIRIZZO'),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  const Icon(Icons.location_on_outlined,
+                      size: 16, color: Color(0xFF7BA566)),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      address,
+                      style: const TextStyle(
+                        color: Color(0xFF333333),
+                        fontSize: 14,
+                        fontFamily: 'Inter',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+            ],
+
+            // ── Data ──────────────────────────────────────────────
+            if (datetime.isNotEmpty) ...[
+              _label('DATA'),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  const Icon(Icons.calendar_today_outlined,
+                      size: 14, color: Color(0xFF9CA3AF)),
+                  const SizedBox(width: 4),
+                  Text(
+                    _formatDate(datetime),
+                    style: const TextStyle(
+                      color: Color(0xFF333333),
+                      fontSize: 13,
+                      fontFamily: 'Inter',
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+            ],
+
+            // ── Foto ──────────────────────────────────────────────
+            if (images.isNotEmpty) ...[
+              _label('FOTO'),
+              const SizedBox(height: 10),
+              _ImageGrid(images: images, baseUrl: ApiService.baseUrl),
+              const SizedBox(height: 24),
+            ],
+          ],
+        ),
       ),
     );
   }
 
-  static Widget _sectionLabel(String text) => Text(
+  static Widget _label(String text) => Text(
         text,
         style: const TextStyle(
-          color: Color(0xFF444444),
-          fontSize: 12,
+          color: Color(0xFF9CA3AF),
+          fontSize: 11,
           fontFamily: 'Inter',
           fontWeight: FontWeight.w600,
           letterSpacing: 0.5,
         ),
       );
 
-  static Widget _fieldBox({required Widget child}) => Container(
-        decoration: BoxDecoration(
-          color: const Color(0xFFF9FAFB),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFE5E7EB)),
-        ),
-        child: child,
-      );
+  static Color _statusColor(String status) {
+    switch (status) {
+      case 'pending':
+        return const Color(0xFFF59E0B);
+      case 'in_progress':
+        return const Color(0xFF38BDF8);
+      case 'resolved':
+        return const Color(0xFF7BA566);
+      case 'rejected':
+        return const Color(0xFFEF4444);
+      default:
+        return const Color(0xFF9CA3AF);
+    }
+  }
 
-  static const TextStyle _inputStyle = TextStyle(
-    color: Color(0xFF111111),
-    fontSize: 14,
-    fontFamily: 'Inter',
-  );
+  static IconData _statusIcon(String status) {
+    switch (status) {
+      case 'pending':
+        return Icons.hourglass_empty;
+      case 'in_progress':
+        return Icons.build_outlined;
+      case 'resolved':
+        return Icons.check_circle_outline;
+      case 'rejected':
+        return Icons.cancel_outlined;
+      default:
+        return Icons.info_outline;
+    }
+  }
+
+  static String _formatDate(String raw) {
+    try {
+      final dt = DateTime.parse(raw);
+      return '${dt.day.toString().padLeft(2, '0')}/'
+          '${dt.month.toString().padLeft(2, '0')}/'
+          '${dt.year}  '
+          '${dt.hour.toString().padLeft(2, '0')}:'
+          '${dt.minute.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return raw;
+    }
+  }
+}
+
+// ── Grid gallery ──────────────────────────────────────────────────
+
+class _ImageGrid extends StatelessWidget {
+  final List<Map<String, dynamic>> images;
+  final String baseUrl;
+
+  const _ImageGrid({required this.images, required this.baseUrl});
+
+  @override
+  Widget build(BuildContext context) {
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        crossAxisSpacing: 6,
+        mainAxisSpacing: 6,
+      ),
+      itemCount: images.length,
+      itemBuilder: (_, i) {
+        final url = '$baseUrl${images[i]['file_path']}';
+        return GestureDetector(
+          onTap: () => _openFullscreen(context, i),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.network(
+              url,
+              fit: BoxFit.cover,
+              errorBuilder: (_, _, _) => Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF3F4F6),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.broken_image_outlined,
+                    color: Color(0xFF9CA3AF)),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _openFullscreen(BuildContext context, int initialIndex) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => _FullscreenGallery(
+          urls: images.map((a) => '$baseUrl${a['file_path']}').toList(),
+          initialIndex: initialIndex,
+        ),
+      ),
+    );
+  }
+}
+
+// ── Fullscreen viewer ─────────────────────────────────────────────
+
+class _FullscreenGallery extends StatefulWidget {
+  final List<String> urls;
+  final int initialIndex;
+
+  const _FullscreenGallery(
+      {required this.urls, required this.initialIndex});
+
+  @override
+  State<_FullscreenGallery> createState() => _FullscreenGalleryState();
+}
+
+class _FullscreenGalleryState extends State<_FullscreenGallery> {
+  late final PageController _controller;
+  late int _current;
+
+  @override
+  void initState() {
+    super.initState();
+    _current = widget.initialIndex;
+    _controller = PageController(initialPage: widget.initialIndex);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.close, color: Colors.white),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: widget.urls.length > 1
+            ? Text(
+                '${_current + 1} / ${widget.urls.length}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontFamily: 'Inter',
+                  fontSize: 14,
+                ),
+              )
+            : null,
+        centerTitle: true,
+      ),
+      body: PageView.builder(
+        controller: _controller,
+        itemCount: widget.urls.length,
+        onPageChanged: (i) => setState(() => _current = i),
+        itemBuilder: (_, i) => InteractiveViewer(
+          minScale: 0.8,
+          maxScale: 4.0,
+          child: Center(
+            child: Image.network(
+              widget.urls[i],
+              fit: BoxFit.contain,
+              loadingBuilder: (_, child, progress) {
+                if (progress == null) return child;
+                return const Center(
+                  child: CircularProgressIndicator(color: Colors.white),
+                );
+              },
+              errorBuilder: (_, _, _) => const Icon(
+                Icons.broken_image_outlined,
+                color: Colors.white54,
+                size: 64,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }

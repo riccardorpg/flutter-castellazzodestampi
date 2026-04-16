@@ -13,7 +13,7 @@ class ApiService {
 
   static Map<String, String> get _authHeaders => {
         'Content-Type': 'application/json',
-        'X-AUTH-TOKEN': ?token,
+        'X-AUTH-TOKEN': token ?? '',
       };
 
   // ── Persistenza token ──────────────────────────────────────────
@@ -40,6 +40,10 @@ class ApiService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_tokenKey);
   }
+
+  static bool isUnauthenticated(Map<String, dynamic> result) =>
+      result['success'] == false &&
+      (result['message'] as String? ?? '').contains('autenticato');
 
   // ── Auth ───────────────────────────────────────────────────────
 
@@ -71,6 +75,21 @@ class ApiService {
     await clearToken();
   }
 
+  static Future<Map<String, dynamic>> forgotPassword(String email) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/api/password-dimenticata'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'email': email}),
+          )
+          .timeout(const Duration(seconds: 15));
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      return {'success': false, 'message': 'Errore di connessione.'};
+    }
+  }
+
   // ── Tipi segnalazione ──────────────────────────────────────────
 
   static Future<Map<String, dynamic>> getReportTypes() async {
@@ -100,6 +119,58 @@ class ApiService {
       return jsonDecode(response.body) as Map<String, dynamic>;
     } catch (e) {
       return {'success': false, 'message': 'Errore di connessione.'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> getReportDetail(String id) async {
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$baseUrl/api/segnalazioni/$id'),
+            headers: _authHeaders,
+          )
+          .timeout(const Duration(seconds: 15));
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      return {'success': false, 'message': 'Errore di connessione.'};
+    }
+  }
+
+  // ── Geocoding ──────────────────────────────────────────────────
+
+  static Future<List<Map<String, dynamic>>> autocompleteAddress(String query) async {
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$baseUrl/api/autocomplete-indirizzo?q=${Uri.encodeComponent(query)}'),
+            headers: _authHeaders,
+          )
+          .timeout(const Duration(seconds: 10));
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      if (body['success'] == true) {
+        return List<Map<String, dynamic>>.from(body['data'] as List);
+      }
+      return [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<String?> reverseGeocode(double lat, double lon) async {
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$baseUrl/api/reverse-geocode?lat=$lat&lon=$lon'),
+            headers: _authHeaders,
+          )
+          .timeout(const Duration(seconds: 10));
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      if (body['success'] == true && body['data'] != null) {
+        return body['data']['address'] as String?;
+      }
+      return null;
+    } catch (_) {
+      return null;
     }
   }
 

@@ -72,11 +72,21 @@ class _MenuScreenState extends State<MenuScreen> {
     final result = await ApiService.getReportTypes();
     if (!mounted) return;
     if (result['success'] == true) {
+      final data = List<Map<String, dynamic>>.from(result['data'] as List);
+      for (final t in data) {
+        debugPrint('[tipo] ${t['name']} → icon_file=${t['icon_file']}');
+      }
       setState(() {
-        _reportTypes =
-            List<Map<String, dynamic>>.from(result['data'] as List);
+        _reportTypes = data;
         _loading = false;
       });
+    } else if (ApiService.isUnauthenticated(result)) {
+      await ApiService.clearToken();
+      if (!mounted) return;
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+        (_) => false,
+      );
     } else {
       setState(() {
         _error = result['message'] as String?;
@@ -85,61 +95,6 @@ class _MenuScreenState extends State<MenuScreen> {
     }
   }
 
-  IconData _iconFromType(String? iconName, String? slug) {
-    const iconMap = <String, IconData>{
-      // nomi icona diretti dall'API
-      'build': Icons.build_circle,
-      'build_circle': Icons.build_circle,
-      'security': Icons.security,
-      'shield': Icons.shield,
-      'lightbulb': Icons.lightbulb,
-      'light': Icons.lightbulb,
-      'electrical_services': Icons.electrical_services,
-      'water': Icons.water_drop,
-      'water_drop': Icons.water_drop,
-      'fire': Icons.local_fire_department,
-      'road': Icons.add_road,
-      'eco': Icons.eco,
-      'park': Icons.park,
-      'volume_up': Icons.volume_up,
-      'trash': Icons.delete_forever,
-      'delete': Icons.delete_forever,
-      'pets': Icons.pets,
-      'signpost': Icons.signpost,
-      'apartment': Icons.apartment,
-      'air': Icons.air,
-      'warning': Icons.warning_amber_rounded,
-      'camera': Icons.camera_alt,
-      'car': Icons.directions_car,
-      'bus': Icons.directions_bus,
-      'parking': Icons.local_parking,
-      'person': Icons.person_off,
-      'front_hand': Icons.front_hand,
-      // slug dal database (trattini → underscore)
-      'guasto_tecnico': Icons.build_circle,
-      'sicurezza': Icons.security,
-      'illuminazione': Icons.lightbulb,
-      'pubblica_illuminazione': Icons.lightbulb,
-      'strade': Icons.add_road,
-      'strade_marciapiedi': Icons.add_road,
-      'verde': Icons.park,
-      'verde_pubblico': Icons.park,
-      'rifiuti': Icons.delete_forever,
-      'rumore': Icons.volume_up,
-      'acqua': Icons.water_drop,
-      'incendio': Icons.local_fire_department,
-      'animali': Icons.pets,
-      'segnaletica': Icons.signpost,
-      'edifici': Icons.apartment,
-      'inquinamento': Icons.air,
-      'vandalismo': Icons.front_hand,
-      'parcheggio': Icons.local_parking,
-      'trasporti': Icons.directions_bus,
-    };
-    return iconMap[iconName] ??
-        iconMap[slug?.replaceAll('-', '_')] ??
-        Icons.report_problem;
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -186,7 +141,7 @@ class _MenuScreenState extends State<MenuScreen> {
           MaterialPageRoute(builder: (_) => const SegnalazioniScreen()),
         ),
         child: Container(
-          height: 56,
+          height: 68,
           decoration: const BoxDecoration(
             color: Colors.white,
             border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
@@ -194,13 +149,13 @@ class _MenuScreenState extends State<MenuScreen> {
           child: const Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.list_alt, color: Color(0xFF666666), size: 20),
-              SizedBox(width: 8),
+              Icon(Icons.list_alt, color: Color(0xFF666666), size: 22),
+              SizedBox(width: 10),
               Text(
                 'Le mie segnalazioni',
                 style: TextStyle(
                   color: Color(0xFF666666),
-                  fontSize: 13,
+                  fontSize: 14,
                   fontFamily: 'Inter',
                   fontWeight: FontWeight.w600,
                 ),
@@ -267,10 +222,7 @@ class _MenuScreenState extends State<MenuScreen> {
         final type = _reportTypes[index];
         return _ReportTypeCard(
           name: type['name'] as String? ?? '',
-          icon: _iconFromType(
-            type['icon'] as String?,
-            type['slug'] as String?,
-          ),
+          iconUrl: type['icon_file'] as String?,
           onTap: () => Navigator.push(
             context,
             MaterialPageRoute(
@@ -285,12 +237,12 @@ class _MenuScreenState extends State<MenuScreen> {
 
 class _ReportTypeCard extends StatelessWidget {
   final String name;
-  final IconData icon;
+  final String? iconUrl;
   final VoidCallback onTap;
 
   const _ReportTypeCard({
     required this.name,
-    required this.icon,
+    this.iconUrl,
     required this.onTap,
   });
 
@@ -321,7 +273,26 @@ class _ReportTypeCard extends StatelessWidget {
                 color: const Color(0xFFEDF5E9),
                 borderRadius: BorderRadius.circular(12),
               ),
-              child: Icon(icon, color: const Color(0xFF7BA566), size: 28),
+              child: iconUrl != null
+                  ? ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.network(
+                        iconUrl!,
+                        width: 56,
+                        height: 56,
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, _, _) => const Icon(
+                          Icons.report_problem,
+                          color: Color(0xFF7BA566),
+                          size: 28,
+                        ),
+                      ),
+                    )
+                  : const Icon(
+                      Icons.report_problem,
+                      color: Color(0xFF7BA566),
+                      size: 28,
+                    ),
             ),
             const SizedBox(height: 12),
             Padding(
