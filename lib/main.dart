@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'login.dart';
 import 'form.dart';
 import 'segnalazioni.dart';
@@ -266,28 +267,45 @@ class _ReportTypeCard extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // ── Quadrato verde ──────────────────────────────────
             Container(
-              width: 56,
-              height: 56,
+              width: 70,   // <-- grandezza quadrato
+              height: 70,  // <-- grandezza quadrato
               decoration: BoxDecoration(
                 color: const Color(0xFFEDF5E9),
                 borderRadius: BorderRadius.circular(12),
               ),
+              alignment: Alignment.center,
               child: iconUrl != null
-                  ? ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: Image.network(
-                        iconUrl!,
-                        width: 56,
-                        height: 56,
-                        fit: BoxFit.contain,
-                        errorBuilder: (_, _, _) => const Icon(
-                          Icons.report_problem,
-                          color: Color(0xFF7BA566),
-                          size: 28,
-                        ),
-                      ),
-                    )
+                  ? iconUrl!.toLowerCase().endsWith('.svg')
+                      // ── Icona SVG ──────────────────────────────
+                      ? SvgPicture.network(
+                          iconUrl!,
+                          width: 52,   // <-- grandezza icona SVG
+                          height: 52,  // <-- grandezza icona SVG
+                          fit: BoxFit.contain,
+                          colorFilter: const ColorFilter.mode(
+                            Color(0xFF7BA566),
+                            BlendMode.srcIn,
+                          ),
+                          placeholderBuilder: (_) => const Icon(
+                            Icons.report_problem,
+                            color: Color(0xFF7BA566),
+                            size: 28,
+                          ),
+                        )
+                      // ── Icona PNG/JPG ───────────────────────────
+                      : Image.network(
+                          iconUrl!,
+                          width: 52,   // <-- grandezza icona PNG
+                          height: 52,  // <-- grandezza icona PNG
+                          fit: BoxFit.contain,
+                          errorBuilder: (_, _, _) => const Icon(
+                            Icons.report_problem,
+                            color: Color(0xFF7BA566),
+                            size: 28,
+                          ),
+                        )
                   : const Icon(
                       Icons.report_problem,
                       color: Color(0xFF7BA566),

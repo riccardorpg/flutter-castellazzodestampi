@@ -146,16 +146,19 @@ class ApiController extends AbstractController
         }
 
         $em = $this->mr->getManager();
-        $types = $em->getRepository(ReportType::class)->findAllActive();
+        $rows = $em->getConnection()->fetchAllAssociative(
+            'SELECT id, name, slug, icon, icon_file FROM cas_report_type WHERE is_active = 1 ORDER BY priority ASC'
+        );
 
+        $base = $request->getSchemeAndHttpHost();
         $result = [];
-        foreach ($types as $type) {
+        foreach ($rows as $row) {
             $result[] = [
-                'id' => $type->getId(),
-                'name' => $type->getName(),
-                'slug' => $type->getSlug(),
-                'icon' => $type->getIcon(),
-                'icon_file' => $type->getIconFile() ? $request->getSchemeAndHttpHost() . '/' . $type->getIconFile() : null
+                'id'        => (string) $row['id'],
+                'name'      => $row['name'],
+                'slug'      => $row['slug'],
+                'icon'      => $row['icon'],
+                'icon_file' => $row['icon_file'] ? $base . '/' . $row['icon_file'] : null,
             ];
         }
 
@@ -177,7 +180,7 @@ class ApiController extends AbstractController
 
         $result = [];
         foreach ($reports as $report) {
-            $result[] = $this->serializeReport($report);
+            $result[] = $this->serializeReport($report, $request);
         }
 
         return new JsonResponse(['success' => true, 'data' => $result]);
@@ -198,7 +201,7 @@ class ApiController extends AbstractController
             return $this->errorResponse('Segnalazione non trovata.', 404);
         }
 
-        return new JsonResponse(['success' => true, 'data' => $this->serializeReport($report)]);
+        return new JsonResponse(['success' => true, 'data' => $this->serializeReport($report, $request)]);
     }
 
     #[Route('/segnalazioni', name: 'api_report_create', methods: ['POST'])]
@@ -246,7 +249,7 @@ class ApiController extends AbstractController
         return new JsonResponse([
             'success' => true,
             'message' => 'Segnalazione inviata con successo.',
-            'data' => $this->serializeReport($report)
+            'data' => $this->serializeReport($report, $request)
         ], 201);
     }
 
@@ -303,7 +306,7 @@ class ApiController extends AbstractController
         return new JsonResponse([
             'success' => true,
             'message' => 'Segnalazione aggiornata.',
-            'data' => $this->serializeReport($report)
+            'data' => $this->serializeReport($report, $request)
         ]);
     }
 
@@ -457,8 +460,16 @@ class ApiController extends AbstractController
         }
     }
 
-    private function serializeReport(Report $report): array
+    private function serializeReport(Report $report, Request $request): array
     {
+        $em = $this->mr->getManager();
+        $base = $request->getSchemeAndHttpHost();
+
+        $typeIconFile = $em->getConnection()->fetchOne(
+            'SELECT icon_file FROM cas_report_type WHERE id = ?',
+            [$report->getReportType()->getId()]
+        );
+
         $attachments = [];
         $uploadDir = $this->params->get('kernel.project_dir').'/'.$this->params->get('web_path').'/uploads/reports/'.$report->getId().'/';
         if (is_dir($uploadDir)) {
@@ -480,22 +491,20 @@ class ApiController extends AbstractController
         return [
             'id' => $report->getId(),
             'type' => [
-                'id' => $report->getReportType()->getId(),
-                'name' => $report->getReportType()->getName(),
-                'slug' => $report->getReportType()->getSlug(),
-                'icon_file' => $report->getReportType()->getIconFile()
-                    ? '/'.$report->getReportType()->getIconFile()
-                    : null
+                'id'        => $report->getReportType()->getId(),
+                'name'      => $report->getReportType()->getName(),
+                'slug'      => $report->getReportType()->getSlug(),
+                'icon_file' => $typeIconFile ? $base . '/' . $typeIconFile : null,
             ],
-            'datetime' => $report->getDatetime()->format('Y-m-d H:i:s'),
-            'latitude' => $report->getLatitude(),
-            'longitude' => $report->getLongitude(),
-            'address' => $report->getAddress(),
-            'priority' => $report->getPriority(),
-            'details' => $report->getDetails(),
-            'status' => $report->getStatus(),
+            'datetime'     => $report->getDatetime()->format('Y-m-d H:i:s'),
+            'latitude'     => $report->getLatitude(),
+            'longitude'    => $report->getLongitude(),
+            'address'      => $report->getAddress(),
+            'priority'     => $report->getPriority(),
+            'details'      => $report->getDetails(),
+            'status'       => $report->getStatus(),
             'status_label' => $report->getStatusLabel(),
-            'attachments' => $attachments
+            'attachments'  => $attachments
         ];
     }
 }

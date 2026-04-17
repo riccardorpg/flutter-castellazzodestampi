@@ -180,10 +180,59 @@ class _FormScreenState extends State<FormScreen> {
     }
   }
 
-  // ── Galleria ───────────────────────────────────────────────────
+  // ── Foto ───────────────────────────────────────────────────────
 
-  Future<void> _pickImages() async {
+  Future<void> _showPhotoOptions() async {
     setState(() => _error = null);
+    await showModalBottomSheet<void>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt_outlined,
+                    color: Color(0xFF7BA566)),
+                title: const Text('Scatta una foto',
+                    style: TextStyle(fontFamily: 'Inter')),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _pickFromCamera();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined,
+                    color: Color(0xFF7BA566)),
+                title: const Text('Scegli dalla galleria',
+                    style: TextStyle(fontFamily: 'Inter')),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _pickFromGallery();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickFromCamera() async {
+    try {
+      final photo = await _picker.pickImage(source: ImageSource.camera);
+      if (photo != null) setState(() => _images = [..._images, photo]);
+    } catch (_) {
+      setState(() => _error =
+          'Impossibile accedere alla fotocamera. Verifica i permessi nelle impostazioni.');
+    }
+  }
+
+  Future<void> _pickFromGallery() async {
     try {
       final picked = await _picker.pickMultiImage();
       if (picked.isNotEmpty) setState(() => _images = [..._images, ...picked]);
@@ -483,7 +532,7 @@ class _FormScreenState extends State<FormScreen> {
                     SizedBox(
                       width: double.infinity,
                       child: OutlinedButton.icon(
-                        onPressed: _pickImages,
+                        onPressed: _showPhotoOptions,
                         style: OutlinedButton.styleFrom(
                           foregroundColor: const Color(0xFF7BA566),
                           side: const BorderSide(color: Color(0xFF7BA566)),
@@ -495,7 +544,7 @@ class _FormScreenState extends State<FormScreen> {
                             size: 16),
                         label: Text(
                           _images.isEmpty
-                              ? 'Aggiungi foto dalla galleria'
+                              ? 'Aggiungi foto'
                               : 'Aggiungi altre foto',
                           style: const TextStyle(
                               fontFamily: 'Inter', fontSize: 13),
